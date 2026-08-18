@@ -1,9 +1,10 @@
 {
+  "_comment": "output_dir is the default when no --output-dir flag or OUTPUT_DIR env var is set (see main.go's config precedence). The directory must already exist; this tool does not create it.",
   "target_asns": [
     "3356", "1299", "3257", "2914", "6453", "6461", "6762", "3491",
     "5511", "12956", "3320", "6830", "7018", "701", "174", "6939"
   ],
-  "output_dir": ".",
+  "output_dir": "./output",
   "batch_size": 1,
   "afis": {
     "4": {

@@ -61,10 +61,11 @@ func newRunID() string {
 // from env/file lookups so the whole precedence chain is testable without needing a
 // real flag.FlagSet or process environment.
 type cliFlags struct {
-	configPath  string
-	ribDateFlag string
-	batchFlag   int
-	afisFlag    string
+	configPath    string
+	ribDateFlag   string
+	batchFlag     int
+	afisFlag      string
+	outputDirFlag string
 }
 
 // buildRunConfig resolves the full CLI-flag > env-var > config-file > default
@@ -117,6 +118,14 @@ func buildRunConfig(flags cliFlags, getenv func(string) string, keys *tier1exclu
 		batchSize = fc.BatchSize
 	}
 
+	outputDir := flags.outputDirFlag
+	if outputDir == "" {
+		outputDir = getenv("OUTPUT_DIR")
+	}
+	if outputDir == "" {
+		outputDir = fc.OutputDir
+	}
+
 	// Parse and validate every --afis entry up front, before running any of them —
 	// fail fast on a typo rather than partially executing then reporting the error.
 	var afis []int
@@ -138,7 +147,7 @@ func buildRunConfig(flags cliFlags, getenv func(string) string, keys *tier1exclu
 	cfg := tier1exclusions.Config{
 		TargetASNs: fc.TargetASNs,
 		RIBDate:    ribDate,
-		OutputDir:  fc.OutputDir,
+		OutputDir:  outputDir,
 		BatchSize:  batchSize,
 		Keys:       keys,
 		AFIs:       afiConfigs,
@@ -189,6 +198,7 @@ func main() {
 	flag.StringVar(&flags.ribDateFlag, "rib-date", "", "RIB snapshot date, YYYY-MM-DD. Overrides RIB_DATE env var.")
 	flag.IntVar(&flags.batchFlag, "batch-size", 0, "covers per rib() call, 0 = use env/config/default. Overrides BATCH_SIZE env var.")
 	flag.StringVar(&flags.afisFlag, "afis", "4,6", "comma-separated address families to run (4, 6, or both)")
+	flag.StringVar(&flags.outputDirFlag, "output-dir", "", "directory for output files. Overrides OUTPUT_DIR env var and the config file's output_dir.")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

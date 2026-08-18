@@ -184,6 +184,44 @@ func TestBuildRunConfig_BatchSizePrecedence(t *testing.T) {
 	}
 }
 
+func TestBuildRunConfig_OutputDirPrecedence(t *testing.T) {
+	path := writeTempConfig(t, `{
+		"target_asns": ["3356"], "output_dir": "/from/config",
+		"afis": {"4": {"group_prefix_len": 12, "pinned_vp_ids": ["1"]}}
+	}`)
+	keys := tier1exclusions.NewKeyPool([]string{"k"}, 700, 95_000_000, 280)
+
+	// Flag wins over env and config.
+	flags := cliFlags{configPath: path, outputDirFlag: "/from/flag", afisFlag: "4"}
+	cfg, _, err := buildRunConfig(flags, fakeGetenv(map[string]string{"OUTPUT_DIR": "/from/env"}), keys)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OutputDir != "/from/flag" {
+		t.Errorf("expected flag value, got %q", cfg.OutputDir)
+	}
+
+	// Env wins over config when flag is empty.
+	flags2 := cliFlags{configPath: path, afisFlag: "4"}
+	cfg2, _, err := buildRunConfig(flags2, fakeGetenv(map[string]string{"OUTPUT_DIR": "/from/env"}), keys)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg2.OutputDir != "/from/env" {
+		t.Errorf("expected env value, got %q", cfg2.OutputDir)
+	}
+
+	// Config value used when neither flag nor env set — preserves old behavior.
+	flags3 := cliFlags{configPath: path, afisFlag: "4"}
+	cfg3, _, err := buildRunConfig(flags3, fakeGetenv(nil), keys)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg3.OutputDir != "/from/config" {
+		t.Errorf("expected config value, got %q", cfg3.OutputDir)
+	}
+}
+
 func TestBuildRunConfig_RejectsNegativeBatchFlag(t *testing.T) {
 	path := writeTempConfig(t, validConfigJSON)
 	keys := tier1exclusions.NewKeyPool([]string{"k"}, 700, 95_000_000, 280)
