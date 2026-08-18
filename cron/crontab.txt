@@ -1,0 +1,13 @@
+# retina-tools crontab
+#
+# The log path below must match LOG_DIR in conf/tier1_settings.conf — cron entries
+# can't source that file themselves, so this is duplicated by necessity. If you
+# change DATA_DIR (and therefore LOG_DIR) there, update this line too.
+#
+# Runs on the 1st of each month at 00:00. Full run output (stdout+stderr) goes to
+# the log file below; tier1_wrapper.sh itself only writes the small failure marker
+# on its own (see LOG_DIR/last_failure.log).
+
+BGP_API_KEYS=key1,key2,key3
+
+0 0 1 * *	/path/to/retina-tools/cron/tier1_wrapper.sh >> /path/to/logs/tier1_wrapper.log 2>&1
