@@ -1,0 +1,16 @@
+# Generated exclusion-list output, progress/checkpoint files, and metadata —
+# produced by tier1exclusions runs, not source. Default path; see
+# conf/tier1_settings.conf (DATA_DIR) if overridden for a real deployment.
+/tier1exclusions/output/
+
+# Default log location (failure marker) — derived from DATA_DIR in
+# conf/tier1_settings.conf, not source.
+/tier1exclusions/logs/
+
+# Go build artifacts
+/tier1exclusions/tier1exclusions
+coverage.out
+*.test
+
+# macOS
+.DS_Store
