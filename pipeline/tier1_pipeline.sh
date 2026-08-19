@@ -11,7 +11,7 @@ export SHELLCHECK_OPTS="--exclude=SC1091"
 shellcheck "$0"
 
 readonly PROG_NAME="${0##*/}"
-TOPLEVEL="$(git rev-parse --show-toplevel)"
+TOPLEVEL="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 readonly TOPLEVEL
 source "${TOPLEVEL}/pipeline/common.sh"
 
