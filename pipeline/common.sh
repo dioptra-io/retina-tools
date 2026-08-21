@@ -120,7 +120,14 @@ log_message() {
 		;;
 	esac
 	timestamp=$(date +'%Y-%m-%dT%H:%M:%SZ')
-	printf '%s%s %s: %s%s[%s] %s%s\n' \
+	# %b, not %s, for the four color-code args specifically — they're defined with
+	# literal '\033[...]' text (regular single quotes, not $'...' ANSI-C quoting),
+	# so something has to interpret that escape sequence into a real ESC byte at
+	# print time. %s never does this for any argument; %b does, for arguments that
+	# contain it. Message content ($*) stays on %s deliberately — it must NOT have
+	# its own backslash sequences reinterpreted, which was the actual point of
+	# moving off echo -e in the first place.
+	printf '%b%s %s: %b%b[%s] %s%b\n' \
 		"${prog_color}" \
 		"${timestamp}" \
 		"${PROG_NAME}" \
