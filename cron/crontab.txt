@@ -1,13 +1,50 @@
 # retina-tools crontab
 #
-# The log path below must match LOG_DIR in conf/tier1_settings.conf — cron entries
-# can't source that file themselves, so this is duplicated by necessity. If you
-# change DATA_DIR (and therefore LOG_DIR) there, update this line too.
+# Two jobs: tier1_wrapper.sh (monthly, generates the tier-1 exclusion baseline and
+# loads it into ClickHouse) and pd_wrapper.sh (daily, generates that day's probing
+# directives from Iris data — depends on tier1_wrapper.sh having populated the
+# tier-1 dictionaries at least once).
 #
-# Runs on the 1st of each month at 00:00. Full run output (stdout+stderr) goes to
-# the log file below; tier1_wrapper.sh itself only writes the small failure marker
-# on its own (see LOG_DIR/last_failure.log).
+# The log paths below must match LOG_DIR in conf/tier1_settings.conf and
+# conf/pd_settings.conf respectively — cron entries can't source those files
+# themselves, so this is duplicated by necessity. If you change DATA_DIR/OUTPUT_DIR
+# (and therefore LOG_DIR) in either conf file, update the matching line here too.
+#
+# PATH: cron runs with a minimal default PATH (typically just /usr/bin:/bin), not
+# your interactive shell's PATH — so binaries that only resolve via your shell
+# profile (e.g. clickhouse at /opt/retina/bin) won't be found under cron even
+# though `which clickhouse` works fine when you run it yourself. Confirmed via
+# `which git jq shellcheck flock clickhouse tier1exclusions` on 2026-08-21:
+#   git, jq, shellcheck, flock -> /usr/bin
+#   clickhouse                 -> /opt/retina/bin
+#   tier1exclusions            -> /usr/local/bin
+# irisctl not yet confirmed — add its directory here too once pd_wrapper.sh is
+# tested for real.
+PATH=/opt/retina/bin:/usr/local/bin:/usr/bin:/bin
 
 BGP_API_KEYS=key1,key2,key3
 
-0 0 1 * *	/path/to/retina-tools/cron/tier1_wrapper.sh >> /path/to/logs/tier1_wrapper.log 2>&1
+# --- tier1_wrapper.sh ---
+#
+# TESTING: currently set to run daily at 00:00 for validation. Switch to the
+# monthly schedule (commented out below) once satisfied — a daily cadence
+# indefinitely will produce far more ClickHouse loads and output files than
+# intended for production use (see PRUNE_DAYS in conf/tier1_settings.conf, which
+# assumes roughly monthly runs).
+
+# Daily, for testing:
+0 0 * * *	/path/to/retina-tools/cron/tier1_wrapper.sh >> /path/to/logs/tier1_wrapper.log 2>&1
+
+# Monthly, for production (1st of each month at 00:00) — uncomment and remove the
+# daily line above once testing is done:
+# 0 0 1 * *	/path/to/retina-tools/cron/tier1_wrapper.sh >> /path/to/logs/tier1_wrapper.log 2>&1
+
+# --- pd_wrapper.sh ---
+#
+# Daily at 01:00 — after tier1_wrapper.sh's midnight run has had time to finish
+# (tier1exclusions itself takes ~4 hours; if tier1_wrapper.sh is ever still running
+# past 01:00, pd_pipeline.sh's own tier-1-dictionary check will simply use whatever
+# was live at that moment, not block on it — worth revisiting the offset if that
+# becomes a real timing concern).
+
+0 1 * * *	/path/to/retina-tools/cron/pd_wrapper.sh >> /path/to/pd_logs/pd_wrapper.log 2>&1

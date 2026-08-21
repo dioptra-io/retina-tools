@@ -16,7 +16,11 @@
 # caller's own shell, not a scoped subshell, and a helper library shouldn't silently
 # change the caller's shell options out from under it.
 
-source "${TOPLEVEL}/conf/common_settings.conf"
+readonly START_MAGENTA='\033[0;35m'
+readonly START_BLUE='\033[0;34m'
+readonly START_YELLOW='\033[0;33m'
+readonly START_RED='\033[0;31m'
+readonly END_COLOR='\033[0m'
 
 #
 # Acquire lock before proceeding to avoid running multiple instances of the caller.
@@ -36,12 +40,10 @@ acquire_lock() {
 		exec {lock_fd}>&-
 		return 1
 	fi
-	# Truncate-then-write, not append — otherwise the file accumulates every past
-	# holder's PID forever. Safe to do while holding the lock: we're the exclusive
-	# holder, and truncating via a fresh open of the same path doesn't invalidate
-	# the already-open lock_fd's flock (same inode, not a new one).
-	: > "${lock}"
-	printf '%s\n' "$$" >> "${lock}"
+	# Direct overwrite (not append) — we're already the exclusive holder at this
+	# point, so this simply expresses "the file's contents are just this PID,"
+	# and avoids accumulating every past holder's PID forever the way >> would.
+	printf '%s\n' "$$" > "${lock}"
 	log_info 1 "pid $$ acquired lock on ${lock}"
 }
 
@@ -50,15 +52,32 @@ acquire_lock() {
 #
 log_info() {
 	local level="$1"
+	# Falls back to 1 if VERBOSE is unset — this library documents VERBOSE as a
+	# precondition callers must set, and every current caller does, but a shared
+	# library is safer defaulting for a future caller that forgets than crashing
+	# on an unbound variable under set -u.
+	local verbosity="${VERBOSE:-1}"
 
-	if [[ ${level} -lt 0 || ${level} -gt 3 ]]; then
+	if [[ ! "${level}" =~ ^[0-3]$ ]]; then
 		log_fatal "invalid verbosity level: ${level}"
 	fi
-	if [[ ${level} -gt ${VERBOSE} ]]; then
+	if [[ ! "${verbosity}" =~ ^[0-3]$ ]]; then
+		log_fatal "invalid VERBOSE value: ${verbosity}"
+	fi
+	if ((level > verbosity)); then
 		return
 	fi
 	shift 1
 	log_message "INFO" "$*"
+}
+
+#
+# Log a warning message — a problem worth flagging that doesn't stop the script,
+# distinct from log_error (which also doesn't stop the script, but signals
+# something more serious) and log_fatal (which does).
+#
+log_warn() {
+	log_message "WARN" "$*"
 }
 
 #
@@ -77,7 +96,7 @@ log_fatal() {
 }
 
 #
-# Log a message (common code for INFO and ERROR).
+# Log a message (common code for INFO, WARN, and ERROR).
 #
 log_message() {
 	local type="$1"
@@ -86,16 +105,30 @@ log_message() {
 	local timestamp
 
 	shift 1
-	if [[ "${type}" != "ERROR" ]]; then
-		prog_color="${START_MAGENTA}"
-		msg_color="${START_BLUE}"
-	else
+	case "${type}" in
+	ERROR)
 		prog_color="${START_RED}"
 		msg_color="${START_RED}"
-	fi
+		;;
+	WARN)
+		prog_color="${START_YELLOW}"
+		msg_color="${START_YELLOW}"
+		;;
+	*)
+		prog_color="${START_MAGENTA}"
+		msg_color="${START_BLUE}"
+		;;
+	esac
 	timestamp=$(date +'%Y-%m-%dT%H:%M:%SZ')
-	(1>&2 echo -n -e "${prog_color}${timestamp} ${PROG_NAME}: ${END_COLOR}")
-	(1>&2 echo -e "${msg_color}[${type}] $*${END_COLOR}")
+	printf '%s%s %s: %s%s[%s] %s%s\n' \
+		"${prog_color}" \
+		"${timestamp}" \
+		"${PROG_NAME}" \
+		"${END_COLOR}" \
+		"${msg_color}" \
+		"${type}" \
+		"$*" \
+		"${END_COLOR}" >&2
 }
 
 #
@@ -104,13 +137,13 @@ log_message() {
 log_lock_details() {
 	local lock_file="$1"
 
-	(1>&2 ls -li "${lock_file}")
-	(1>&2 cat "${lock_file}")
+	ls -li -- "${lock_file}" >&2 || true
+	cat -- "${lock_file}" >&2 || true
 }
 
 #
 # Log a separator line to visually distinguish between different sections of the logs.
 #
 log_line() {
-	(printf '%*s\n' 72 '' | tr ' ' '-') 1>&2
+	printf '%*s\n' 72 '' | tr ' ' '-' >&2
 }
