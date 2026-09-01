@@ -32,19 +32,21 @@ source "${TOPLEVEL}/pipeline/common.sh"
 # to load fetched Parquet data) can only read from that one designated directory, as
 # a security restriction, regardless of how the server itself is deployed.
 #
-# Confirmed against the real production server on 2026-08-21 via a DATABASE_ACCESS_
-# DENIED error, which reported the actual configured path directly:
-#   /opt/retina/retina-tools/tier1exclusions/logs/user_files
-# This is an unusual, oddly-specific path — no config file exists for this
-# ClickHouse instance (per earlier discussion), so user_files_path is very likely
-# defaulting to something relative to whatever directory `clickhouse server --daemon`
-# happened to be launched FROM, not a deliberately chosen fixed location. That means
-# this value could silently change again on any future restart from a different
-# directory — worth giving clickhouse-server an explicit --user_files_path (or a
-# minimal config) at some point so this stops being an accident of cwd. Until then,
-# if this starts failing again after a restart, re-confirm the real path the same
-# way (the DATABASE_ACCESS_DENIED error reports it directly) rather than guessing.
-readonly CH_USER_FILES="/opt/retina/retina-tools/tier1exclusions/logs/user_files"
+# No config file exists for this ClickHouse instance, so user_files_path defaults to
+# something relative to wherever `clickhouse server --daemon` was last launched
+# FROM — not a fixed location. This is not theoretical: it has already changed once
+# in production. Originally confirmed as
+# /opt/retina/retina-tools/tier1exclusions/logs/user_files on 2026-08-21; after a
+# later server restart (from $HOME), it silently became /opt/retina/user_files
+# instead (confirmed 2026-09-01, same DATABASE_ACCESS_DENIED error pattern) — the
+# hardcoded value below went stale the moment the server was restarted from a
+# different directory, with no error until the next fetch actually ran. This WILL
+# happen again on the next restart from yet another directory. Give clickhouse-
+# server an explicit --user_files_path (or a real config file) before this recurs a
+# third time — patching this constant again is treating the symptom, not the cause.
+# If it fails again before that's done: the DATABASE_ACCESS_DENIED error reports the
+# real current path directly, don't guess.
+readonly CH_USER_FILES="/opt/retina/user_files"
 TMP_DIR="$(mktemp -d)"
 readonly TMP_DIR
 readonly MEAS_MD_ALL="${TMP_DIR}/meas_md_all"

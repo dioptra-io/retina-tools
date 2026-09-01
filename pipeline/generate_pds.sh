@@ -651,6 +651,17 @@ FORMAT JSONEachRow" > "${TMP_FULL_OUTPUT}"; then
 # nothing to intersect against. Same scratch-table/staged-diff pattern as
 # generate_ipv4_pds — see its doc comment for the full reasoning.
 #
+# The agent_id CASE's ELSE 'unknown' is structurally unreachable (cityHash64(...) %
+# 10 always produces 0-9, all ten of which are already covered by WHEN clauses) —
+# unlike v4's ELSE, which is a genuine data-validation branch for an unrecognized
+# source IP. This one exists purely so ClickHouse's type inference doesn't mark
+# agent_id (and therefore probing_directive_id, computed from it) as Nullable — a
+# CASE with no ELSE is typed Nullable(String) regardless of whether every value is
+# actually covered, and MergeTree's ORDER BY (the sorting key for the scratch table
+# below) rejects a nullable sorting key outright (confirmed in production: Code 44,
+# ILLEGAL_COLUMN, "Sorting key contains nullable columns"). Removing this ELSE
+# reintroduces that failure even though the branch itself can never be hit.
+#
 generate_ipv6_pds() {
 	local t_start
 	t_start=$(date +%s)
@@ -695,6 +706,7 @@ FROM (
             WHEN 7 THEN 'retina-southamerica-east1'
             WHEN 8 THEN 'retina-us-east1'
             WHEN 9 THEN 'retina-us-west4'
+            ELSE 'unknown'
         END                                                              AS agent_id,
         ttl                                                              AS near_ttl,
         if(cityHash64(probe_dst_prefix, ttl) % 2 = 0, 58, 17)           AS protocol,
