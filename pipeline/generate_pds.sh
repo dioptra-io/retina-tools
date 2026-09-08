@@ -3,48 +3,19 @@
 # Generates IPv4 and (if available) IPv6 probing directive (PD) files from the Iris
 # links tables that pipeline/fetch_iris_links.sh loaded into ClickHouse for a given
 # date. A standalone tool — usable manually or from pipeline/pd_pipeline.sh, which
-# calls it as step 3 of the PD-generation pipeline.
+# calls it as step 3 of the PD-generation pipeline. Design rationale (commit
+# protocol, baseline tracking, IPv6 agent mapping): see generator_spec.md.
 #
-# Produces two kinds of output:
-#   pds_v4.jsonl / pds_v6.jsonl        full snapshot of today's PDs, split by AFI —
-#                                       for bootstrap (an orchestrator loading its
-#                                       entire initial state) or manual inspection.
-#   pds_diff.jsonl                     one combined file (not split by AFI — ApplyDiff
-#                                       takes mixed v4+v6 lists in one call, IPVersion
-#                                       is just a field on each record, not something
-#                                       the consumer branches on), op-tagged JSONL:
-#                                       {"op":"insert", ...full PD fields...} or
-#                                       {"op":"remove","probing_directive_id":<id>}
-#                                       (minimal on purpose — the only field a remove
-#                                       operation actually needs downstream).
+# Produces:
+#   pds_v4.jsonl / pds_v6.jsonl   full snapshot, split by AFI — bootstrap/inspection.
+#   pds_diff.jsonl                one combined file, op-tagged JSONL:
+#                                 {"op":"insert", ...full fields...} or the
+#                                 minimal {"op":"remove","probing_directive_id":<id>}.
 #
-# Commit protocol: all artifacts (both full files, the combined diff, both baseline
-# advances) are PREPARED before anything is published — nothing above this point in
-# main() has touched a live output file or baseline. The combined diff is installed
-# BEFORE either baseline is advanced, which is the guarantee that actually matters:
-# a baseline must never move before its corresponding diff has been durably
-# installed (durably = successfully renamed into place; this does not add fsync, so
-# it is not power-loss-durable — acceptable for this job). Publication itself is
-# NOT one atomic unit, though — it is a sequential series of installs and then
-# sequential baseline exchanges (v4 file, v4 sidecar, v6 file, v6 sidecar, combined
-# diff, v4 baseline, v4 state, v6 baseline, v6 state). A crash partway through that
-# final sequence can leave a partial commit. That residual risk is accepted,
-# matching the same category of accepted risk as the v4/v6 EXCHANGE TABLES pair not
-# being atomic elsewhere in this pipeline, rather than building a full durable
-# run-tracking/recovery system for a once-daily, human-supervised job. What the
-# protocol actually eliminates is the earlier, more serious failure mode: a baseline
-# silently advancing while its diff was never published at all — not every possible
-# partial-failure ordering.
-#
-# The "baseline" is tracked internally in ClickHouse (pd_baseline_v4/v6 — just
-# probing_directive_id) and pd_generation_state tracks the last committed --date per
-# AFI, to refuse a run that would rewind an already-advanced baseline (a real risk
-# given this tool's own standalone/manual-use design — a backfill run for an old
-# date must not be allowed to silently corrupt the live daily pipeline's baseline).
-#
-# Diffing assumes every previous diff was actually applied downstream and nothing
-# else changed the orchestrator's live set out of band. If that assumption is ever
-# violated, the baseline silently drifts from reality — not fixed here.
+# Baseline (pd_baseline_v4/v6) only ever advances after pds_diff.jsonl is durably
+# installed — never call commit_baseline before that. A run for an older --date
+# than what's already in pds_v{4,6}.jsonl.date is refused (see
+# check_date_not_older_than_committed).
 #
 # Expects the input tables to already exist, named
 # iris_zeph__links__<date>_<index> for each index in --zeph-indices (not
@@ -129,15 +100,9 @@ EOF
 
 #
 # backup_if_exists <path>
-# If path already exists — e.g. this is a re-run for a date already processed, or
-# a normal daily overwrite since output filenames are fixed — copies it to path.bak
-# first, and does the same for path.date if it exists (a .bak without a matching
-# .bak-of-the-date-it-was-generated-for isn't self-describing). Uses cp, not mv: the
-# original must stay at `path` until the new content is actually ready to install
-# via the final mv, so a failure between the backup step and the install step can
-# never leave `path` missing entirely (mv-then-mv could; cp-then-mv can't, since the
-# original is only ever replaced by one atomic rename). A single generation of
-# backup, not accumulated history — each new backup overwrites the previous one.
+# Copies path (and path.date, if present) to .bak before it's overwritten. Uses cp,
+# not mv, so the original stays at `path` until the final mv actually installs new
+# content — a failure in between can never leave `path` missing entirely.
 #
 backup_if_exists() {
 	local path="$1"
@@ -170,12 +135,6 @@ install_date_sidecar() {
 main() {
 	parse_cmdline "$@"
 
-	if ! "${DRY_RUN}"; then
-		mkdir -p -- "${OUTPUT_DIR}"
-	fi
-
-	preflight_check_tables
-
 	if "${DRY_RUN}"; then
 		generate_ipv4_pds
 		if [[ "${IPV6_FETCHED}" -eq 1 ]]; then
@@ -190,21 +149,17 @@ main() {
 		return
 	fi
 
-	# Global, not OUTPUT_DIR-scoped: the actual shared resource this protects is
-	# ClickHouse state (pd_baseline_v4/v6, pd_generation_state), not the output
-	# directory — two invocations with DIFFERENT --output-dir values would still
-	# race on the same baseline tables otherwise. This closes a real gap, not a
-	# defensive restatement: pd_wrapper.sh's own lock only protects invocations
-	# that go through the wrapper, but this script explicitly supports standalone
-	# manual invocation (see its own header) as a first-class use case — a manual
-	# run bypasses the wrapper's lock entirely and had no protection until now.
+	mkdir -p -- "${OUTPUT_DIR}"
+	preflight_check_tables
+
+	# Protects ClickHouse state (baselines), not the output directory — must stay
+	# global, not OUTPUT_DIR-scoped.
 	local lock_file="/tmp/${PROG_NAME}.lock"
 	if ! acquire_lock "${lock_file}"; then
 		log_lock_details "${lock_file}"
 		log_fatal "another PD generation is already running"
 	fi
 
-	ensure_generation_state_table
 	check_date_not_older_than_committed v4
 
 	# --- Prepare phase: compute everything, commit nothing yet ---
@@ -257,13 +212,10 @@ main() {
 	install_date_sidecar "${diff_output}" "${DATE}"
 	log_info 1 "combined diff -> ${diff_output}"
 
-	# Only now — every file is durably installed — advance the baselines. This is
-	# the point the Blocker review identified: everything above this line can fail
-	# and be retried with nothing lost; a failure past this line is the narrow,
-	# accepted residual risk described in this file's header comment.
-	commit_baseline "pd_baseline_v4" "${v4_staged_baseline}" v4 "${DATE}"
+	# Must come after every file above is installed — never move earlier.
+	commit_baseline "pd_baseline_v4" "${v4_staged_baseline}"
 	if [[ -n "${v6_staged_baseline}" ]]; then
-		commit_baseline "pd_baseline_v6" "${v6_staged_baseline}" v6 "${DATE}"
+		commit_baseline "pd_baseline_v6" "${v6_staged_baseline}"
 	fi
 
 	echo "V4_PDS=${v4_pds}"
@@ -276,18 +228,10 @@ main() {
 
 #
 # preflight_check_tables
-# Confirms every input table this run needs actually exists before running the
-# (large, slow) generation queries against them — a clear error here beats a
-# ClickHouse "table doesn't exist" error surfacing from inside a 40-line query,
-# especially for the standalone/manual-invocation case where --zeph-indices could
-# reference a typo'd date or index. Skipped in dry-run, matching dry-run's existing
-# "no ClickHouse queries at all" contract.
+# Confirms every input table exists before running the slow generation queries —
+# a clear error here beats a cryptic one from inside a 40-line query.
 #
 preflight_check_tables() {
-	if "${DRY_RUN}"; then
-		return
-	fi
-
 	check_database_engine
 
 	local indices=()
@@ -303,9 +247,7 @@ preflight_check_tables() {
 
 #
 # check_database_engine
-# EXCHANGE TABLES (used for the baseline commit) requires the Atomic or Shared
-# database engine — fail clearly here rather than deep inside that call, once both
-# AFIs' expensive generation work has already run.
+# EXCHANGE TABLES needs Atomic or Shared — fail here, not deep inside that call.
 #
 check_database_engine() {
 	local engine
@@ -336,35 +278,21 @@ require_table() {
 }
 
 #
-# ensure_generation_state_table
-# ReplacingMergeTree so a later commit for the same afi logically replaces the
-# earlier row on read (via FINAL) — this table only ever needs "the latest
-# committed date per afi", not a full history.
-#
-ensure_generation_state_table() {
-	clickhouse client --query "
-CREATE TABLE IF NOT EXISTS pd_generation_state (
-    afi               String,
-    last_committed_date String,
-    committed_at      DateTime DEFAULT now()
-) ENGINE = ReplacingMergeTree(committed_at)
-ORDER BY afi"
-}
-
-#
 # check_date_not_older_than_committed <afi>
-# Refuses to proceed if DATE is older than the last date this afi's baseline was
-# actually committed for. Without this, a standalone/manual run for an old date
-# (a real, intended use case for this tool — backfill or debugging) could silently
-# rewind the baseline the live daily pipeline depends on, corrupting its next diff.
-# Empty result (first run ever for this afi) is not an error — nothing to rewind yet.
+# Refuses a run that would rewind an afi's baseline to an older date — a real risk
+# given standalone/manual use (a backfill run for an old date). Reads the .date
+# sidecar already written by install_date_sidecar in the prior successful run's
+# commit phase — no separate state table needed, since that file already records
+# exactly this. Missing file (first run) is fine, nothing to rewind yet.
 #
 check_date_not_older_than_committed() {
 	local afi="$1"
-	local last_committed
+	local date_file="${OUTPUT_DIR}/pds_${afi}.jsonl.date"
+	local last_committed=""
 
-	last_committed=$(clickhouse client --query "
-SELECT last_committed_date FROM pd_generation_state FINAL WHERE afi = '${afi}'")
+	if [[ -f "${date_file}" ]]; then
+		last_committed=$(<"${date_file}")
+	fi
 
 	if [[ -n "${last_committed}" && "${DATE}" < "${last_committed}" ]]; then
 		log_fatal "--date ${DATE} is older than the last committed ${afi} baseline date (${last_committed}) — refusing to rewind the live baseline. If this old-date run is intentional (backfill/debug), its diff must not be applied to the orchestrator."
@@ -389,12 +317,9 @@ ORDER BY probing_directive_id"
 
 #
 # prepare_diff <result_table> <baseline_table> <diff_parts_output>
-# Computes insert (full records, tagged "op":"insert" — what ApplyDiff's toInsert
-# needs) and remove (just the ID, tagged "op":"remove" — the only field ApplyDiff's
-# toRemove actually reads) into diff_parts_output, and STAGES (but does not exchange)
-# a new baseline table containing result_table's ID set. Sets
-# DIFF_INSERT_COUNT/DIFF_REMOVE_COUNT and STAGED_BASELINE_TABLE as side effects.
-# Nothing here is visible/committed — see commit_baseline for that.
+# Computes insert (full records) and remove (ID only) into diff_parts_output, and
+# stages (but doesn't exchange) a new baseline. Nothing here is committed — see
+# commit_baseline.
 #
 prepare_diff() {
 	local result_table="$1"
@@ -407,6 +332,7 @@ prepare_diff() {
 	insert_part=$(mktemp --tmpdir="${OUTPUT_DIR}" '.pds_diff_insert.XXXXXX') ||
 		log_fatal "failed to create temporary diff-insert file"
 	CLEANUP_TMP_FILES+=("${insert_part}")
+	# ORDER BY probing_directive_id: see generate_ipv4_pds's full-output query.
 	if ! clickhouse client --query "
 SELECT 'insert' AS op, probing_directive_id, ip_version, protocol, agent_id, destination_address, near_ttl, next_header
 FROM ${result_table}
@@ -421,6 +347,9 @@ FORMAT JSONEachRow" > "${insert_part}"; then
 	remove_part=$(mktemp --tmpdir="${OUTPUT_DIR}" '.pds_diff_remove.XXXXXX') ||
 		log_fatal "failed to create temporary diff-remove file"
 	CLEANUP_TMP_FILES+=("${remove_part}")
+	# ORDER BY here mainly for consistency/reproducibility with the insert query
+	# above — remove entries are just IDs, not new probing targets, so the
+	# input-ordering concern doesn't really apply to this one.
 	if ! clickhouse client --query "
 SELECT 'remove' AS op, probing_directive_id
 FROM ${baseline_table}
@@ -447,36 +376,25 @@ AS SELECT probing_directive_id FROM ${result_table}"; then
 }
 
 #
-# commit_baseline <baseline_table> <staged_table> <afi> <date>
-# The second, final phase — only ever called after the combined diff file has
-# already been durably installed. Exchanges the staged baseline into place and
-# records the commit date. Staging + EXCHANGE, matching the pattern already used
-# elsewhere in this pipeline for ClickHouse table swaps.
+# commit_baseline <baseline_table> <staged_table>
+# Final phase — only called after the diff file is durably installed. Exchanges the
+# staged baseline into place.
 #
 commit_baseline() {
 	local baseline_table="$1"
 	local staged_table="$2"
-	local afi="$3"
-	local date="$4"
 
 	if ! clickhouse client --query "EXCHANGE TABLES ${baseline_table} AND ${staged_table}"; then
 		log_fatal "failed to commit baseline for ${baseline_table}"
 	fi
 	clickhouse client --query "DROP TABLE IF EXISTS ${staged_table}"
-	if ! clickhouse client --query "INSERT INTO pd_generation_state (afi, last_committed_date) VALUES ('${afi}', '${date}')"; then
-		log_fatal "baseline committed for ${afi}, but the committed date could not be recorded — the date-monotonicity guard's own state is now stale, treating this as a failed run so it gets noticed rather than silently leaving that protection unreliable"
-	fi
 }
 
 #
 # validate_result <result_table> <afi_label>
-# Two cheap sanity checks on a freshly generated result set, before it's ever
-# written anywhere: no probing_directive_id collisions (the ID is a content hash,
-# not a guaranteed-unique key — this doesn't prove correctness, just catches an
-# unexpected collision loudly instead of silently dropping/merging rows), and no
-# row left with agent_id='unknown' (the source-IP-to-region mapping failed to match
-# for that row — a directive the orchestrator likely can't use, better to fail than
-# publish it silently).
+# Two sanity checks before publishing: no probing_directive_id collisions (it's a
+# content hash, not a guaranteed-unique key), and no agent_id='unknown' (source
+# address didn't match any known agent).
 #
 validate_result() {
 	local result_table="$1"
@@ -484,10 +402,8 @@ validate_result() {
 	local total
 	local distinct
 
-	# Two separate single-value queries, not one multi-column query — matches how
-	# the rest of this codebase queries counts elsewhere, and avoids depending on
-	# an assumption about ClickHouse's default multi-column output separator that
-	# isn't verified against a real instance from this environment.
+	# Two single-value queries, not one multi-column query — avoids depending on
+	# ClickHouse's default column-separator format.
 	total=$(clickhouse client --query "SELECT count() FROM ${result_table}")
 	distinct=$(clickhouse client --query "SELECT uniqExact(probing_directive_id) FROM ${result_table}")
 	if [[ "${total}" != "${distinct}" ]]; then
@@ -503,25 +419,16 @@ validate_result() {
 
 #
 # generate_ipv4_pds
-# Builds the stable-core UNION across every table named in ZEPH_INDICES, then
-# generates PDs from the FIRST such table (matching the original script's
-# ${zeph_indices[0]} — not necessarily table _0, since an empty measurement earlier
-# in processing order can leave a gap; using the wrong "first" table here would
-# silently read from an empty table and produce zero PDs, or skip real data further
-# along) restricted to (prefix, src_addr, ttl) tuples seen in every one of them — a
-# link is only "stable" if it showed up consistently across all fetched
-# measurements for the date. TTL is widened by +/-2 around any hop where the
-# near/far endpoint's tier-1 membership is ambiguous (differs between near_addr and
-# far_addr), to give the orchestrator a small window to re-resolve it.
+# Stable-core UNION across every table in ZEPH_INDICES, then generates PDs from the
+# first such table restricted to (prefix, src_addr, ttl) tuples seen in all of them
+# — a link is "stable" only if consistent across every fetched measurement for the
+# date. TTL is widened +/-2 around any hop where tier-1 membership differs between
+# near_addr and far_addr.
 #
-# The result is materialized into a scratch table (not written straight to a file)
-# so it can be read multiple times without re-running this expensive query: once
-# for the full file (written to a TEMP path — nothing is installed here, see
-# main()'s commit phase), once for the diff/staged-baseline (prepare_diff). Sets
-# GENERATED_ROWS, TMP_FULL_OUTPUT, DIFF_INSERT_COUNT, DIFF_REMOVE_COUNT, and
-# STAGED_BASELINE_TABLE as side effects (bash has no clean multi-value return
-# without a global or printing to stdout, and stdout here is reserved for the final
-# tool-level summary).
+# Materializes into a scratch table (not straight to a file) so it can be read
+# twice without re-running the expensive query: once for the full file, once for
+# the diff (prepare_diff). Sets GENERATED_ROWS, TMP_FULL_OUTPUT, DIFF_INSERT_COUNT,
+# DIFF_REMOVE_COUNT, and STAGED_BASELINE_TABLE as side effects.
 #
 generate_ipv4_pds() {
 	local t_start
@@ -554,11 +461,8 @@ generate_ipv4_pds() {
 		meas_num=$((meas_num + 1))
 	done
 
-	# $$ (this script's PID) makes the scratch table name unique per invocation —
-	# same reasoning as the mktemp-based temp filenames elsewhere in this pipeline:
-	# a manual run overlapping with the cron-triggered one shouldn't clobber a
-	# fixed shared table name. Doesn't replace real locking (still the wrapper's
-	# job), just closes this one specific collision.
+	# $$ makes the scratch table name unique per invocation, closing the same
+	# collision the mktemp temp filenames do elsewhere.
 	local result_table="pd_result_v4_$$"
 	CLEANUP_TABLES+=("${result_table}")
 	clickhouse client --query "DROP TABLE IF EXISTS ${result_table}"
@@ -626,6 +530,11 @@ FROM (
 	TMP_FULL_OUTPUT=$(mktemp --tmpdir="${OUTPUT_DIR}" '.pds_v4.XXXXXX') ||
 		log_fatal "failed to create temporary IPv4 output file"
 	CLEANUP_TMP_FILES+=("${TMP_FULL_OUTPUT}")
+	# ORDER BY probing_directive_id (a hash) is deliberate, not just a tie-breaker:
+	# the source links tables come in a correlated/ordered form, and without this,
+	# that ordering would leak into the output file's row order too — undesirable
+	# for a probing schedule. A hash-based sort scatters output order independent
+	# of any input ordering.
 	if ! clickhouse client --query "
 SELECT probing_directive_id, ip_version, protocol, agent_id, destination_address, near_ttl, next_header
 FROM ${result_table}
@@ -646,21 +555,13 @@ FORMAT JSONEachRow" > "${TMP_FULL_OUTPUT}"; then
 
 #
 # generate_ipv6_pds
-# Same TTL-widening logic as generate_ipv4_pds, but no stable-core UNION step — only
-# one IPv6 measurement is ever fetched per date (see fetch_iris_links.sh), so there's
-# nothing to intersect against. Same scratch-table/staged-diff pattern as
-# generate_ipv4_pds — see its doc comment for the full reasoning.
+# Same TTL-widening as generate_ipv4_pds, no stable-core UNION (only one IPv6
+# measurement per date). Same scratch-table/staged-diff pattern.
 #
-# The agent_id CASE's ELSE 'unknown' is structurally unreachable (cityHash64(...) %
-# 10 always produces 0-9, all ten of which are already covered by WHEN clauses) —
-# unlike v4's ELSE, which is a genuine data-validation branch for an unrecognized
-# source IP. This one exists purely so ClickHouse's type inference doesn't mark
-# agent_id (and therefore probing_directive_id, computed from it) as Nullable — a
-# CASE with no ELSE is typed Nullable(String) regardless of whether every value is
-# actually covered, and MergeTree's ORDER BY (the sorting key for the scratch table
-# below) rejects a nullable sorting key outright (confirmed in production: Code 44,
-# ILLEGAL_COLUMN, "Sorting key contains nullable columns"). Removing this ELSE
-# reintroduces that failure even though the branch itself can never be hit.
+# agent_id is matched from probe_src_addr against each agent's external IPv6 /64
+# — a different address space from v4's internal 10.0.x.2. Matched by prefix, not
+# exact address, to tolerate whatever host bits appear in real data. See
+# generator_spec.md for the mapping's derivation and rationale.
 #
 generate_ipv6_pds() {
 	local t_start
@@ -695,17 +596,17 @@ SELECT
 FROM (
     SELECT
         toString(min(probe_dst_addr))                                    AS destination_address,
-        CASE cityHash64(probe_dst_prefix, ttl) % 10
-            WHEN 0 THEN 'retina-asia-east1'
-            WHEN 1 THEN 'retina-asia-northeast1'
-            WHEN 2 THEN 'retina-asia-south1'
-            WHEN 3 THEN 'retina-asia-southeast1'
-            WHEN 4 THEN 'retina-europe-north1'
-            WHEN 5 THEN 'retina-europe-west6'
-            WHEN 6 THEN 'retina-me-central1'
-            WHEN 7 THEN 'retina-southamerica-east1'
-            WHEN 8 THEN 'retina-us-east1'
-            WHEN 9 THEN 'retina-us-west4'
+        CASE
+            WHEN startsWith(IPv6NumToString(min(probe_src_addr)), '2600:1900:4030:7f37:') THEN 'retina-asia-east1'
+            WHEN startsWith(IPv6NumToString(min(probe_src_addr)), '2600:1900:4050:1d6:')  THEN 'retina-asia-northeast1'
+            WHEN startsWith(IPv6NumToString(min(probe_src_addr)), '2600:1900:40a0:3fa:')  THEN 'retina-asia-south1'
+            WHEN startsWith(IPv6NumToString(min(probe_src_addr)), '2600:1900:4080:652:')  THEN 'retina-asia-southeast1'
+            WHEN startsWith(IPv6NumToString(min(probe_src_addr)), '2600:1900:4150:693:')  THEN 'retina-europe-north1'
+            WHEN startsWith(IPv6NumToString(min(probe_src_addr)), '2600:1900:4160:6a2:')  THEN 'retina-europe-west6'
+            WHEN startsWith(IPv6NumToString(min(probe_src_addr)), '2600:1901:81c0:30a:')  THEN 'retina-me-central1'
+            WHEN startsWith(IPv6NumToString(min(probe_src_addr)), '2600:1900:40f0:170:')  THEN 'retina-southamerica-east1'
+            WHEN startsWith(IPv6NumToString(min(probe_src_addr)), '2600:1900:4020:2532:') THEN 'retina-us-east1'
+            WHEN startsWith(IPv6NumToString(min(probe_src_addr)), '2600:1900:4180:68e:')  THEN 'retina-us-west4'
             ELSE 'unknown'
         END                                                              AS agent_id,
         ttl                                                              AS near_ttl,
@@ -716,6 +617,7 @@ FROM (
         SELECT
             probe_dst_prefix,
             probe_dst_addr,
+            probe_src_addr,
             near_ttl + arrayJoin(if(
                 dictGet('tier1_trie_v6', 'origin_asn', near_addr) !=
                 dictGet('tier1_trie_v6', 'origin_asn', far_addr),
@@ -726,7 +628,7 @@ FROM (
             OR dictGet('tier1_trie_v6', 'origin_asn', far_addr) != 0)
         AND ttl > 0
     )
-    GROUP BY probe_dst_prefix, ttl
+    GROUP BY probe_dst_prefix, probe_src_addr, ttl
 )"; then
 		log_fatal "IPv6 PD generation failed"
 	fi
@@ -736,6 +638,7 @@ FROM (
 	TMP_FULL_OUTPUT=$(mktemp --tmpdir="${OUTPUT_DIR}" '.pds_v6.XXXXXX') ||
 		log_fatal "failed to create temporary IPv6 output file"
 	CLEANUP_TMP_FILES+=("${TMP_FULL_OUTPUT}")
+	# ORDER BY probing_directive_id: see generate_ipv4_pds's identical query for why.
 	if ! clickhouse client --query "
 SELECT probing_directive_id, ip_version, protocol, agent_id, destination_address, near_ttl, next_header
 FROM ${result_table}
@@ -817,25 +720,18 @@ parse_cmdline() {
 
 #
 # validate_zeph_indices
-# ZEPH_INDICES gets interpolated directly into ClickHouse table names — normally
-# it's produced by fetch_iris_links.sh's own stdout, always well-formed, but this
-# script is also meant to be run standalone/manually, where a hand-typed value is a
-# real (not just theoretical) source of typos. A duplicate index specifically isn't
-# just a cosmetic mistake: it would inflate the stable-core UNION's meas count,
-# silently making the HAVING countDistinct(meas) = n_zeph check stricter than
-# intended and corrupting the result, not just erroring loudly.
+# ZEPH_INDICES is normally well-formed (from fetch_iris_links.sh's own stdout), but
+# this script also runs standalone, where a hand-typed value is a real typo risk. A
+# duplicate index isn't just cosmetic — it inflates the stable-core UNION's meas
+# count, silently corrupting the result rather than erroring loudly.
 #
 validate_zeph_indices() {
 	local indices=()
 	local idx
 	local -A seen=()
 
-	# Explicit boundary check before splitting — confirmed empirically that
-	# `IFS=',' read -ra` catches a leading or embedded empty field ("0,,2"
-	# splits to an entry that fails the regex below) but NOT a trailing comma
-	# ("0," silently splits to just ["0"], quietly dropping the empty trailing
-	# field instead of rejecting it) — which could mask a real typo like meaning
-	# to type "0,1" and missing the second number.
+	# `IFS=',' read -ra` catches "0,,2" but silently drops a trailing comma
+	# ("0," -> just ["0"]) instead of rejecting it — checked explicitly here.
 	if [[ "${ZEPH_INDICES}" == ,* || "${ZEPH_INDICES}" == *, || "${ZEPH_INDICES}" == *,,* ]]; then
 		log_fatal "--zeph-indices must be a comma-separated list of integers, no leading/trailing/double commas: ${ZEPH_INDICES}"
 	fi
