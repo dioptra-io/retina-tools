@@ -53,6 +53,13 @@ main() {
 	prune_old_output
 	prune_old_iris_tables
 
+	# PENDING (target: within ~1 week of 2026-09-08) — not yet active. Once the
+	# orchestrator is ready to receive this, uncomment.
+	#
+	# if ! docker compose --project-directory "${ORCHESTRATOR_COMPOSE_DIR}" kill -s HUP orchestrator; then
+	# 	log_error "failed to send SIGHUP to orchestrator via docker compose (project dir: ${ORCHESTRATOR_COMPOSE_DIR}) — diff installed but reload not triggered"
+	# fi
+
 	log_info 0 "daily PD generation completed successfully"
 }
 

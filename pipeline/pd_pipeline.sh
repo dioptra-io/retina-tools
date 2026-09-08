@@ -106,22 +106,19 @@ main() {
 
 #
 # check_tier1_dictionaries
-# Fails fast if the tier-1 prefix tables are empty or missing — generate_pds.sh's
-# dictGet calls would otherwise silently treat every address as non-tier-1 (origin_asn
-# defaults to 0), producing PDs from an empty target space rather than a clear error.
-# Checks two distinct things: the source TABLES have rows (via count), and the
-# DICTIONARIES built from them are actually loaded and queryable (via a
-# representative dictGet — a dictionary that failed to attach/load errors here
-# rather than just returning a default value, so this is a genuinely different
-# check from the table count, not a redundant one).
+# Fails fast if tier-1 prefix tables/dictionaries aren't ready — otherwise
+# generate_pds.sh's dictGet calls would silently treat every address as
+# non-tier-1 (origin_asn defaults to 0), producing PDs from an empty target space.
+# Checks both the tables (rows exist) and the dictionaries built from them (a
+# representative dictGet succeeds) — a dictionary that failed to load errors on
+# dictGet rather than just returning a default, so these are genuinely different
+# checks, not redundant ones.
 #
 check_tier1_dictionaries() {
 	local v4_count v6_count
 
-	# Captured to variables first, not folded into `|| echo "0"` — that pattern
-	# makes "ClickHouse query failed" and "genuinely zero rows" indistinguishable,
-	# reporting a misleading "tables are empty" when the real problem could be
-	# ClickHouse being unreachable entirely.
+	# Captured, not folded into `|| echo "0"` — that would make a ClickHouse
+	# failure indistinguishable from genuinely zero rows.
 	if ! v4_count=$(clickhouse client --query "SELECT count() FROM tier1_prefixes_v4 WHERE origin_asn != 0"); then
 		log_fatal "failed to query tier1_prefixes_v4 — is ClickHouse reachable?"
 	fi

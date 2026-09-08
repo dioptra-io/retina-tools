@@ -1,6 +1,6 @@
 # retina-tools crontab
 #
-# tier1_wrapper.sh: biweekly (1st/15th), generates the tier-1 exclusion baseline.
+# tier1_wrapper.sh: daily, generates the tier-1 exclusion baseline.
 # pd_wrapper.sh: daily, generates that day's PDs (needs tier1's dictionaries loaded
 # at least once first).
 #
@@ -14,11 +14,7 @@ BGP_API_KEYS=key1,key2,key3
 IRIS_PASSWORD=your-password-here
 
 # --- tier1_wrapper.sh ---
-# TESTING: daily. Switch to the biweekly line below once satisfied.
 0 0 * * *	/path/to/retina-tools/cron/tier1_wrapper.sh >> /path/to/logs/tier1_wrapper.log 2>&1
-
-# Biweekly, for production (not exactly every 15 days — months vary in length):
-# 0 0 1,15 * *	/path/to/retina-tools/cron/tier1_wrapper.sh >> /path/to/logs/tier1_wrapper.log 2>&1
 
 # --- pd_wrapper.sh ---
 # 01:00, after tier1_wrapper.sh's midnight run has had time to finish (~4h).
