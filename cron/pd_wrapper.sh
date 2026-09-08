@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 #
-# This wrapper script is invoked by cron to run pipeline/pd_pipeline.sh (which
-# checks tier-1 dictionaries, fetches Iris links, and generates PDs) for today's
-# date, and to handle everything specific to running that as a scheduled,
-# unattended job: locking against overlapping runs, recording failures where
-# they'll actually be seen, and pruning old output files so ${OUTPUT_DIR} doesn't
-# grow forever.
+# Cron entry point for pipeline/pd_pipeline.sh: locking, failure marker, pruning.
 #
 
 set -euo pipefail
@@ -22,10 +17,8 @@ readonly VERBOSE=1
 readonly LOCK_FILE="/tmp/${PROG_NAME}.lock"
 readonly FAILURE_MARKER="${LOG_DIR}/last_failure.log"
 
-# No lock-file deletion here, deliberately — see tier1_wrapper.sh for the full
-# reasoning: with flock (no noclobber), a stale lock FILE is harmless, and deleting
-# it unconditionally risks unlinking a file a different, still-running instance has
-# open.
+# No lock-file deletion here — see tier1_wrapper.sh for why (stale lock files are
+# harmless with flock).
 cleanup() {
 	local exit_code="$?"
 
@@ -38,10 +31,7 @@ trap cleanup EXIT
 
 main() {
 	local date
-	# Yesterday, not today: this wrapper runs early in the day (per crontab.txt),
-	# before today's measurements have finished — the confirmed, previously
-	# established decision is to always process the prior day's finished
-	# measurements, not attempt to find today's (which wouldn't exist yet).
+	# Yesterday: today's measurements aren't finished yet when this runs.
 	date="$(date -u -d 'yesterday' +%Y%m%d)"
 
 	mkdir -p "${LOG_DIR}"
@@ -58,8 +48,6 @@ main() {
 		fail_run "pd_pipeline.sh" "$?"
 	fi
 
-	# Clear any stale failure marker from a previous failed run — this run
-	# succeeded end to end.
 	rm -f "${FAILURE_MARKER}"
 
 	prune_old_output
@@ -70,21 +58,12 @@ main() {
 
 #
 # prune_old_output
-# With fixed output filenames (pds_v4.jsonl/pds_v6.jsonl, overwritten daily, not
-# date-named), this directory no longer accumulates files the way it used to — so
-# this is now just a general safety net for any stray/orphaned files that end up
-# here (manual test output, leftover .bak from a period of failed runs, etc.),
-# not the primary defense against unbounded growth it originally was.
+# Fixed filenames mean this directory doesn't accumulate under normal operation —
+# this only catches orphaned mktemp files from a killed/crashed run.
 #
 prune_old_output() {
 	local removed
 
-	# Cheap guard against a config-file typo before a destructive find -delete —
-	# not defending against external input (PRUNE_DAYS/OUTPUT_DIR are only ever
-	# set in conf/pd_settings.conf, which we control), but a human editing that
-	# file by hand is a real, plausible way to end up with an empty or malformed
-	# value, and the failure mode here (pruning far more than intended) is bad
-	# enough to be worth two cheap checks.
 	if [[ ! "${PRUNE_DAYS}" =~ ^[0-9]+$ ]]; then
 		log_fatal "PRUNE_DAYS must be a non-negative integer, got: ${PRUNE_DAYS}"
 	fi
@@ -100,19 +79,9 @@ prune_old_output() {
 
 #
 # prune_old_iris_tables
-# Drops iris_zeph__links__<date>_N and iris_ipv6__links__<date> tables older than
-# IRIS_TABLE_RETENTION_DAYS. Unlike prune_old_output above, this addresses a real,
-# currently-unbounded growth problem: fetch_iris_links.sh creates a brand new set of
-# these tables every single day (confirmed 500M+ rows per zeph table in production),
-# and their per-table `TTL fetched_at + INTERVAL 30 DAY` only prunes ROWS within an
-# existing table — it does nothing about new dated tables piling up daily as full
-# table objects. This drops the table objects themselves, on a much shorter
-# retention than that 30-day row TTL.
-#
-# Table dates are parsed from the table name itself (e.g. the "20260825" in
-# iris_zeph__links__20260825_0), not from any timestamp column — YYYYMMDD is a
-# fixed-width, zero-padded format, so a plain string comparison against the cutoff
-# date is safe and correctly matches chronological order.
+# Drops iris_zeph__links__<date>_N / iris_ipv6__links__<date> tables older than
+# IRIS_TABLE_RETENTION_DAYS. Table date is parsed from the table name (fixed-width
+# YYYYMMDD, so plain string comparison against the cutoff is safe).
 #
 prune_old_iris_tables() {
 	if [[ ! "${IRIS_TABLE_RETENTION_DAYS}" =~ ^[0-9]+$ ]]; then
@@ -122,11 +91,8 @@ prune_old_iris_tables() {
 	local cutoff_date
 	cutoff_date=$(date -u -d "-${IRIS_TABLE_RETENTION_DAYS} days" +%Y%m%d)
 
-	# Captured into a variable first, not read directly from a `< <(...)` process
-	# substitution — a failure inside process substitution is invisible to the
-	# parent shell (pipefail can't see into it, same issue as elsewhere in this
-	# codebase), so a failing SHOW TABLES would otherwise silently look like "no
-	# tables to prune" instead of a real, reportable error.
+	# Captured to variables first, not read via `< <(...)` — a failure inside
+	# process substitution is invisible to the parent shell.
 	local zeph_tables
 	local ipv6_tables
 	if ! zeph_tables=$(clickhouse client --query "SHOW TABLES LIKE 'iris_zeph__links__%'"); then
@@ -146,9 +112,7 @@ prune_old_iris_tables() {
 		[[ -z "${table}" ]] && continue
 		table_date=$(grep -oP '\d{8}' <<< "${table}" | head -1)
 		if [[ -n "${table_date}" && "${table_date}" < "${cutoff_date}" ]]; then
-			# A single failed DROP shouldn't kill the whole (otherwise-successful)
-			# wrapper run — log it clearly and keep going with the rest, rather
-			# than letting set -e abort mid-loop with no clear attribution.
+			# One failed DROP shouldn't kill an otherwise-successful run.
 			if clickhouse client --query "DROP TABLE IF EXISTS ${table}"; then
 				removed=$((removed + 1))
 			else
@@ -168,9 +132,8 @@ prune_old_iris_tables() {
 
 #
 # fail_run <step> <exit_code>
-# Writes the small failure marker and exits non-zero. Called instead of log_fatal so
-# the marker file (not just stderr) records what failed — stderr output disappears
-# into cron's default mail-on-error behavior, the marker doesn't.
+# Writes the failure marker (Grafana/Loki can alert on this or on [ERROR] in logs)
+# and exits non-zero.
 #
 fail_run() {
 	local step="$1"

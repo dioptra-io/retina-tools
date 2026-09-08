@@ -5,13 +5,10 @@
 # iris_ipv6__links__<date>. A standalone tool — usable manually or from
 # pipeline/pd_pipeline.sh, which calls it as step 2 of the PD-generation pipeline.
 #
-# On success, prints exactly two lines to stdout (nothing else goes to stdout — all
-# progress/diagnostic output goes to stderr via log_info/log_warn/log_error), so a
-# caller can capture them directly:
-#   ZEPH_INDICES=<comma-separated indices of the zeph tables that were actually
-#                 fetched with data, e.g. "0,2,3" — NOT necessarily contiguous, since
-#                 an empty measurement still consumes a numeric slot (its table gets
-#                 created but stays empty) without being included here>
+# On success, prints exactly two lines to stdout (everything else goes to stderr):
+#   ZEPH_INDICES=<comma-separated indices of zeph tables actually fetched with data,
+#                 e.g. "0,2,3" — not necessarily contiguous, since an empty
+#                 measurement still consumes a numeric slot without being listed>
 #   IPV6_FETCHED=<0 or 1>
 #
 
@@ -24,39 +21,14 @@ TOPLEVEL="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 readonly TOPLEVEL
 source "${TOPLEVEL}/pipeline/common.sh"
 
-#
-# Internal constants.
-#
-# CH_USER_FILES must match wherever clickhouse-server is actually configured to read
-# from — its user_files_path setting. ClickHouse's file() table function (used below
-# to load fetched Parquet data) can only read from that one designated directory, as
-# a security restriction, regardless of how the server itself is deployed.
-#
-# No config file exists for this ClickHouse instance, so user_files_path defaults to
-# something relative to wherever `clickhouse server --daemon` was last launched
-# FROM — not a fixed location. This is not theoretical: it has already changed once
-# in production. Originally confirmed as
-# /opt/retina/retina-tools/tier1exclusions/logs/user_files on 2026-08-21; after a
-# later server restart (from $HOME), it silently became /opt/retina/user_files
-# instead (confirmed 2026-09-01, same DATABASE_ACCESS_DENIED error pattern) — the
-# hardcoded value below went stale the moment the server was restarted from a
-# different directory, with no error until the next fetch actually ran. This WILL
-# happen again on the next restart from yet another directory. Give clickhouse-
-# server an explicit --user_files_path (or a real config file) before this recurs a
-# third time — patching this constant again is treating the symptom, not the cause.
-# If it fails again before that's done: the DATABASE_ACCESS_DENIED error reports the
-# real current path directly, don't guess.
-readonly CH_USER_FILES="/opt/retina/user_files"
+# CH_USER_FILES must match clickhouse-server's user_files_path (file() can only
+# read from there).
+readonly CH_USER_FILES="/var/lib/clickhouse/user_files"
 TMP_DIR="$(mktemp -d)"
 readonly TMP_DIR
 readonly MEAS_MD_ALL="${TMP_DIR}/meas_md_all"
 
-# Retry settings for fetch_table's download+load step — see attempt_fetch_and_load's
-# doc comment for why this exists (a confirmed, not hypothetical, transient failure
-# in production). 30s, not a few seconds — each fetch already takes 500-600s, so a
-# longer cooldown before retrying is still negligible overhead, but gives an actual
-# transient network/service issue real time to clear rather than immediately
-# re-hammering whatever just failed.
+# 30s — fetches take 500-600s anyway, so this is negligible overhead.
 readonly FETCH_MAX_ATTEMPTS=3
 readonly FETCH_RETRY_DELAY=30
 
@@ -228,9 +200,8 @@ check_meas_agents() {
 	fi
 
 	local num_agents num_state
-	# `|| true` guards against grep -c's own quirk: it exits 1 (not 0) when the
-	# count is genuinely zero, which set -e would otherwise treat as a real
-	# failure and kill the script — a legitimately-zero count isn't an error here.
+	# grep -c exits 1 on a genuinely-zero count, which set -e would otherwise
+	# treat as a real failure.
 	num_agents="$(grep -c '"tool_parameters"' "${tmp_file}" || true)"
 	num_state="$(grep -c '"state": "finished"' "${tmp_file}" || true)"
 	rm -f -- "${tmp_file}"
@@ -248,9 +219,8 @@ check_meas_agents() {
 # attempt_fetch_and_load <uuid> <uuid_clean> <protocol_filter> <staging>
 # One attempt at downloading a measurement's links and loading them into staging.
 # Returns 0 (success), 1 (failure — retryable by the caller), or 2 (genuinely empty
-# result — not retryable, since retrying wouldn't change a legitimately-zero-row
-# outcome). Truncates staging first so a partial row set left behind by a prior
-# failed attempt can't leak into this one.
+# result — not retryable). Truncates staging first so a partial row set from a
+# prior failed attempt can't leak into this one.
 #
 attempt_fetch_and_load() {
 	local uuid="$1"
@@ -283,12 +253,9 @@ attempt_fetch_and_load() {
 		return 2
 	fi
 
-	# irisctl appends a trailing newline after the Parquet footer which breaks
-	# ClickHouse's Parquet reader (wrong magic bytes). Strip the last byte — but
-	# only if the file is at least large enough to plausibly hold real Parquet
-	# content (magic bytes alone are 4+4=8 bytes); a suspiciously tiny "non-empty"
-	# file is a sign something else is wrong, not a file this workaround is safe
-	# to blindly truncate.
+	# irisctl appends a trailing byte after the Parquet footer, breaking
+	# ClickHouse's reader (wrong magic bytes) — strip it, but only once the file
+	# is at least large enough to plausibly hold real Parquet content.
 	local size
 	size=$(stat -c '%s' "${tmpfile}")
 	if ((size < 9)); then
@@ -309,18 +276,9 @@ attempt_fetch_and_load() {
 
 #
 # fetch_table <uuid> <dest> <protocol_filter>
-# Fetches one measurement's links table from Iris into a ClickHouse table named
-# dest, filtered by protocol_filter (1=ICMP, 58=ICMPv6). Returns 2 (not an error) if
-# the measurement produced no rows.
-#
-# Retries FETCH_MAX_ATTEMPTS times on a genuine failure (network blip during the
-# irisctl download, a resulting corrupted/truncated Parquet file, etc.) — confirmed
-# not hypothetical: a production run hit exactly this ("wrong magic bytes at the end
-# of file") on one measurement out of four, while the other three succeeded via the
-# identical code path, pointing at a transient issue with that one fetch rather than
-# a systematic bug. Does NOT retry a genuinely empty result (return 2) — that's a
-# legitimate outcome, not a failure, and retrying it would just waste time confirming
-# the same true zero again.
+# Fetches one measurement's links into ClickHouse table dest, filtered by
+# protocol_filter (1=ICMP, 58=ICMPv6). Returns 2 (not an error) if empty. Retries
+# FETCH_MAX_ATTEMPTS times on genuine failure, not on empty.
 #
 fetch_table() {
 	local uuid="$1"

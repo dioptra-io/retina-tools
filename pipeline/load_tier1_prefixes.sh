@@ -14,7 +14,7 @@
 # the swap step in main() for how and why. The v4/v6 swaps are two separate
 # EXCHANGE TABLES calls, not one transaction — if v4 succeeds and v6 fails, they'd
 # briefly disagree on which generation is live. Accepted as a documented, low-
-# probability, human-recoverable risk given this runs monthly with an operator
+# probability, human-recoverable risk given this runs infrequently with an operator
 # watching, rather than built out into generation tables + a manifest system.
 #
 
