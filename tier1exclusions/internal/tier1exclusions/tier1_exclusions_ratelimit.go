@@ -195,10 +195,8 @@ func NewKeyPool(keys []string, maxRequests, maxVolumeBytes, maxExecSeconds float
 
 // NextKey returns the best available key: fewest consecutive failures first, lowest
 // volume usage as a tiebreaker. The scan starts at a rotating offset (not always index
-// 0) so that when several keys are tied, which one wins rotates across calls instead of
-// always favoring the same key — the first key encountered in the offset-started sweep
-// wins any tie, matching sort.SliceStable's stability semantics without needing to
-// build and sort a whole copy of the key list on every call.
+// 0), so when several keys are tied, which one wins rotates across calls instead of
+// always favoring the same key.
 func (kp *KeyPool) NextKey() string {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()
@@ -222,28 +220,24 @@ func (kp *KeyPool) NextKey() string {
 	return best
 }
 
-// Limiters returns the limiter set for a given key.
 func (kp *KeyPool) Limiters(key string) KeyLimiters {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()
 	return kp.limiters[key]
 }
 
-// ReportSuccess resets a key's consecutive-failure count.
 func (kp *KeyPool) ReportSuccess(key string) {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()
 	kp.consecutiveFailures[key] = 0
 }
 
-// ReportFailure increments a key's consecutive-failure count.
 func (kp *KeyPool) ReportFailure(key string) {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()
 	kp.consecutiveFailures[key]++
 }
 
-// ConsecutiveFailures exposes the current failure count for a key (for logging).
 func (kp *KeyPool) ConsecutiveFailures(key string) int {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()

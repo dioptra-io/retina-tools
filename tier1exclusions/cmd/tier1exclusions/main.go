@@ -33,13 +33,9 @@ const (
 	exitOK          = 0
 	exitConfigError = 1
 	exitRunFailed   = 2
-	defaultRibHour  = "08:00:00" // fixed time-of-day for every snapshot; see parseRibDate
+	defaultRibHour  = "08:00:00" // fixed hour avoids diurnal BGP skew in day-to-day comparisons
 )
 
-// parseRibDate accepts a bare date, e.g. "2026-08-07". Not user-configurable down to
-// the hour: the underlying RIS/RouteViews/PCH/CGTF archives only snapshot every 2-8
-// hours anyway, so hour-level input precision wouldn't buy anything real, and a fixed
-// hour keeps day-to-day comparisons from being skewed by diurnal BGP patterns.
 func parseRibDate(s string) (time.Time, error) {
 	if _, err := time.Parse("2006-01-02", s); err != nil {
 		return time.Time{}, fmt.Errorf("expected YYYY-MM-DD, got %q", s)
@@ -47,8 +43,6 @@ func parseRibDate(s string) (time.Time, error) {
 	return time.Parse("2006-01-02T15:04:05", s+"T"+defaultRibHour)
 }
 
-// newRunID returns a short random hex id for correlating this run's log lines (e.g.
-// when several invocations' logs land in the same Loki stream).
 func newRunID() string {
 	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {
@@ -57,9 +51,8 @@ func newRunID() string {
 	return hex.EncodeToString(b)
 }
 
-// cliFlags holds the raw parsed flag values, passed into buildRunConfig separately
-// from env/file lookups so the whole precedence chain is testable without needing a
-// real flag.FlagSet or process environment.
+// cliFlags is kept separate from env/file lookups so buildRunConfig is testable
+// without a real flag.FlagSet or process environment.
 type cliFlags struct {
 	configPath    string
 	ribDateFlag   string
@@ -68,11 +61,9 @@ type cliFlags struct {
 	outputDirFlag string
 }
 
-// buildRunConfig resolves the full CLI-flag > env-var > config-file > default
-// precedence chain into a ready-to-run tier1exclusions.Config and AFI list. Pulled out
-// of main() so this branching logic is testable without mocking flag parsing or
-// network calls. getenv is injected (rather than calling os.Getenv directly) so tests
-// can supply a fake environment without mutating real process state.
+// buildRunConfig resolves the CLI-flag > env-var > config-file > default precedence
+// chain into a ready-to-run Config and AFI list. getenv is injected so tests can
+// supply a fake environment.
 func buildRunConfig(flags cliFlags, getenv func(string) string, keys *tier1exclusions.KeyPool) (tier1exclusions.Config, []int, error) {
 	fc, err := tier1exclusions.LoadFileConfig(flags.configPath)
 	if err != nil {
@@ -95,9 +86,8 @@ func buildRunConfig(flags cliFlags, getenv func(string) string, keys *tier1exclu
 		ribDate, _ = parseRibDate(today)
 	}
 
-	// 0 is the valid "not specified, use env/config/default" sentinel throughout this
-	// chain (see tier1exclusions.DefaultBatchSize) — only reject an explicitly
-	// negative value, which can only mean a genuine input mistake.
+	// 0 means "not specified, fall through to env/config/default"; only an explicit
+	// negative value is rejected.
 	batchSize := flags.batchFlag
 	if batchSize < 0 {
 		return tier1exclusions.Config{}, nil, fmt.Errorf("invalid --batch-size %d, must be >= 0", batchSize)
@@ -126,8 +116,7 @@ func buildRunConfig(flags cliFlags, getenv func(string) string, keys *tier1exclu
 		outputDir = fc.OutputDir
 	}
 
-	// Parse and validate every --afis entry up front, before running any of them —
-	// fail fast on a typo rather than partially executing then reporting the error.
+	// Validate every --afis entry before running any of them, to fail on a typo early.
 	var afis []int
 	for _, afiStr := range strings.Split(flags.afisFlag, ",") {
 		var afi int
@@ -155,7 +144,6 @@ func buildRunConfig(flags cliFlags, getenv func(string) string, keys *tier1exclu
 	return cfg, afis, nil
 }
 
-// parseAPIKeys splits and trims BGP_API_KEYS, dropping empty entries.
 func parseAPIKeys(raw string) []string {
 	var out []string
 	for _, k := range strings.Split(raw, ",") {
@@ -166,13 +154,10 @@ func parseAPIKeys(raw string) []string {
 	return out
 }
 
-// afiRunner matches tier1exclusions.Run's signature — a func type so tests can inject
-// a fake instead of making real network calls.
+// afiRunner matches tier1exclusions.Run's signature, so tests can inject a fake
+// instead of making real network calls.
 type afiRunner func(ctx context.Context, cfg tier1exclusions.Config, afi int, logger *slog.Logger) (tier1exclusions.ExclusionResult, error)
 
-// runAllAFIs runs each requested AFI via runFn, logging progress, and returns whether
-// every one succeeded. Extracted from main() so this orchestration logic — skip AFIs
-// missing from config, track overall success — is testable without real network calls.
 func runAllAFIs(ctx context.Context, cfg tier1exclusions.Config, afis []int, configPath string, logger *slog.Logger, runFn afiRunner) bool {
 	allSucceeded := true
 	for _, afi := range afis {
@@ -204,9 +189,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// stderr, not stdout: this tool writes no data to stdout, but keeping logs on
-	// stderr is the standard CLI convention (stdout reserved for a tool's actual
-	// output) and costs nothing to follow.
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	logger = logger.With("run_id", newRunID())
 
@@ -228,9 +210,8 @@ func main() {
 
 	allSucceeded := runAllAFIs(ctx, cfg, afis, flags.configPath, logger, tier1exclusions.Run)
 
-	// Single terminal line for alerting to match on — e.g. a Loki/Alertmanager rule
-	// watching for status="failed" here, rather than needing to reason about every
-	// intermediate error line.
+	// Single terminal line for alerting to match on (e.g. a Loki/Alertmanager rule on
+	// status="failed") instead of reasoning about intermediate error lines.
 	if !allSucceeded {
 		logger.Error("Process failed to complete", "status", "failed")
 		os.Exit(exitRunFailed)

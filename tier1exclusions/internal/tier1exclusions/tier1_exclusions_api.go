@@ -231,8 +231,6 @@ func (c *APIClient) CheckVPStatus(ctx context.Context, vpIDs []string, ribDate t
 }
 
 // FindFullFeedVPs queries live for VPs above a rib_size threshold. Used only when no
-// pinned list is configured.
-// FindFullFeedVPs queries live for VPs above a rib_size threshold. Used only when no
 // pinned list is configured (currently unreachable in production, since both AFI
 // configs pin their VP lists — but kept correct for when a new AFI is added without
 // one, or an existing pinned list is accidentally cleared).
@@ -391,11 +389,11 @@ type risPrefixesResponse struct {
 
 // FetchAnnouncedPrefixes returns (prefixes, ok) for the given ASN/AFI as of ribDate,
 // via RIPEstat's ris-prefixes endpoint — a genuine historical lookup, not a live one.
-// Pinning this to ribDate matters at the monthly run cadence this tool operates at: a
+// Pinning this to ribDate matters at the cadence this tool operates at: a
 // run that pauses/resumes across days (rate limits, circuit breaker) must not silently
 // mix a live parent-list fetch from resume time with a rib() more-specifics lookup
 // still pinned to the original snapshot date — and a fixed snapshot date is also what
-// makes a given month's run reproducible/auditable after the fact.
+// makes a run reproducible/auditable after the fact.
 // ok=false means the request itself failed — distinct from a successful request
 // returning zero prefixes; callers must not conflate the two.
 func FetchAnnouncedPrefixes(ctx context.Context, asn string, afiIs4 bool, ribDate time.Time, logger *slog.Logger) ([]string, bool) {
