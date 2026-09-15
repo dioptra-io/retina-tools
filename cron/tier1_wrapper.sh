@@ -15,7 +15,7 @@ source "${TOPLEVEL}/conf/tier1_settings.conf"
 
 readonly VERBOSE=1
 readonly LOCK_FILE="/tmp/${PROG_NAME}.lock"
-readonly FAILURE_MARKER="${LOG_DIR}/last_failure.log"
+readonly FAILURE_MARKER="${LOG_DIR}/tier1_last_failure.log"
 
 # No lock-file deletion here: with flock (no noclobber), a stale lock file is
 # harmless — the kernel lock releases when the owning process exits. Deleting it
@@ -40,6 +40,8 @@ main() {
 		exit 1
 	fi
 
+	fetch_bgp_api_keys
+
 	if "${TOPLEVEL}/pipeline/tier1_pipeline.sh" --output-dir "${DATA_DIR}"; then
 		log_info 0 "tier1_pipeline.sh succeeded"
 	else
@@ -51,6 +53,20 @@ main() {
 	prune_old_output
 
 	log_info 0 "refresh completed successfully"
+}
+
+#
+# fetch_bgp_api_keys
+# Fetches BGP_API_KEYS fresh from GCP Secret Manager and exports it, so
+# tier1_pipeline.sh (and the tier1exclusions binary it runs) inherit it — never
+# stored in the crontab or on disk. Requires the VM's service account to have
+# roles/secretmanager.secretAccessor on BGP_API_KEYS_SECRET_NAME.
+#
+fetch_bgp_api_keys() {
+	if ! BGP_API_KEYS=$(gcloud secrets versions access latest --secret="${BGP_API_KEYS_SECRET_NAME}"); then
+		log_fatal "failed to fetch secret ${BGP_API_KEYS_SECRET_NAME} from GCP Secret Manager"
+	fi
+	export BGP_API_KEYS
 }
 
 #

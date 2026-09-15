@@ -15,7 +15,7 @@ source "${TOPLEVEL}/conf/pd_settings.conf"
 
 readonly VERBOSE=1
 readonly LOCK_FILE="/tmp/${PROG_NAME}.lock"
-readonly FAILURE_MARKER="${LOG_DIR}/last_failure.log"
+readonly FAILURE_MARKER="${LOG_DIR}/pd_last_failure.log"
 
 # No lock-file deletion here — see tier1_wrapper.sh for why (stale lock files are
 # harmless with flock).
@@ -42,6 +42,8 @@ main() {
 		exit 1
 	fi
 
+	fetch_iris_password
+
 	if "${TOPLEVEL}/pipeline/pd_pipeline.sh" --date "${date}" --output-dir "${OUTPUT_DIR}"; then
 		log_info 0 "pd_pipeline.sh succeeded"
 	else
@@ -61,6 +63,20 @@ main() {
 	# fi
 
 	log_info 0 "daily PD generation completed successfully"
+}
+
+#
+# fetch_iris_password
+# Fetches IRIS_PASSWORD fresh from GCP Secret Manager and exports it, so
+# pd_pipeline.sh (and fetch_iris_links.sh's irisctl calls) inherit it — never
+# stored in the crontab or on disk. Requires the VM's service account to have
+# roles/secretmanager.secretAccessor on IRIS_PASSWORD_SECRET_NAME.
+#
+fetch_iris_password() {
+	if ! IRIS_PASSWORD=$(gcloud secrets versions access latest --secret="${IRIS_PASSWORD_SECRET_NAME}"); then
+		log_fatal "failed to fetch secret ${IRIS_PASSWORD_SECRET_NAME} from GCP Secret Manager"
+	fi
+	export IRIS_PASSWORD
 }
 
 #

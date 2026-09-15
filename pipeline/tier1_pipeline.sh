@@ -19,7 +19,7 @@ source "${TOPLEVEL}/pipeline/common.sh"
 # Global variables to support command line flags and arguments.
 #
 CONFIG_FILE="${TOPLEVEL}/tier1exclusions/prod.conf.json"	# --config
-DATA_DIR="${TOPLEVEL}/tier1exclusions/output"			# --output-dir
+DATA_DIR="${HOME}/tier1exclusions/output"			# --output-dir
 RIB_DATE_FLAG=""						# --rib-date (default: today, UTC)
 VERBOSE=1							# --verbose
 

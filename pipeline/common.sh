@@ -12,11 +12,24 @@
 # Add deliberately if/when needed, don't assume this is a gap to fill silently.
 #
 
-readonly START_MAGENTA='\033[0;35m'
-readonly START_BLUE='\033[0;34m'
-readonly START_YELLOW='\033[0;33m'
-readonly START_RED='\033[0;31m'
-readonly END_COLOR='\033[0m'
+# Colors are empty (not the real escape codes) when stderr isn't a terminal — e.g.
+# cron's `>> file 2>&1` redirect. Otherwise log viewers that don't render ANSI
+# (Grafana's Loki panel included) show raw garbled escape bytes inline instead of
+# color. The rest of log_message's printf logic doesn't need to change: %b on an
+# empty string just produces no output.
+if [[ -t 2 ]]; then
+	readonly START_MAGENTA='\033[0;35m'
+	readonly START_BLUE='\033[0;34m'
+	readonly START_YELLOW='\033[0;33m'
+	readonly START_RED='\033[0;31m'
+	readonly END_COLOR='\033[0m'
+else
+	readonly START_MAGENTA=''
+	readonly START_BLUE=''
+	readonly START_YELLOW=''
+	readonly START_RED=''
+	readonly END_COLOR=''
+fi
 
 #
 # Acquire a non-blocking lock. Stale lock files are harmless with flock (the kernel
