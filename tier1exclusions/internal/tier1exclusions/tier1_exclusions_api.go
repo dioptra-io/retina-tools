@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const userAgent = "retina-tools/tier1exclusions"
+const userAgent = "retina-iris-pds/tier1exclusions"
 
 // baseBackoff starts at 1 minute: bgproutes.io's rate limiting can be far more
 // aggressive than its documented limits suggest (a request shape reliable for weeks

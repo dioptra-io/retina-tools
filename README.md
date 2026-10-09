@@ -1,10 +1,11 @@
-# retina-tools
+# retina-iris-pds
 
 ## About
 
-`retina-tools` is a collection of standalone tools supporting the
-[Retina](https://github.com/dioptra-io) active measurement platform — things
-Retina's core services depend on without needing to ship themselves.
+`retina-iris-pds` is a PD source for the
+[Retina](https://github.com/dioptra-io) active measurement platform. It builds the
+tier-1 exclusion lists and, from Iris measurements, generates daily probing
+directives (PDs) as JSONL files for the orchestrator.
 
 ## Contents
 
@@ -27,4 +28,4 @@ Retina's core services depend on without needing to ship themselves.
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see [LICENSE](LICENSE).

@@ -1,24 +1,14 @@
-# retina-tools crontab
+# retina-iris-pds crontab
 #
-# tier1_wrapper.sh: daily, generates the tier-1 exclusion baseline.
-# pd_wrapper.sh: daily, generates that day's PDs (needs tier1's dictionaries loaded
-# at least once first).
+# Log paths must match LOG_DIR in conf/tier1_settings.conf / pd_settings.conf;
+# cron can't source those files, so keep them in sync by hand.
 #
-# Log paths below must match LOG_DIR in conf/tier1_settings.conf / pd_settings.conf
-# — cron can't source those files, so keep both in sync by hand if either changes.
-#
-# cron's default PATH is minimal, not your shell's — hence the explicit line below.
+# cron's default PATH is minimal, hence the explicit line. gcloud must be on it:
+# the wrappers fetch BGP_API_KEYS and IRIS_PASSWORD from Secret Manager.
 PATH=/opt/retina/bin:/usr/local/bin:/usr/bin:/bin
 
-# BGP_API_KEYS and IRIS_PASSWORD are no longer set here — fetched fresh from GCP
-# Secret Manager at the start of each wrapper script (see fetch_bgp_api_keys in
-# tier1_wrapper.sh, fetch_iris_password in pd_wrapper.sh). Requires the VM's
-# service account to have roles/secretmanager.secretAccessor on both secrets, and
-# gcloud available on the PATH above.
+# Uses today's 00:00 UTC RIB snapshot; takes ~4h.
+0 8 * * *	/opt/retina/retina-iris-pds/cron/tier1_wrapper.sh >> /opt/retina/logs/tier1_wrapper.log 2>&1
 
-# --- tier1_wrapper.sh ---
-0 0 * * *	/opt/retina/retina-tools/cron/tier1_wrapper.sh >> /opt/retina/logs/tier1_wrapper.log 2>&1
-
-# --- pd_wrapper.sh ---
-# 01:00, after tier1_wrapper.sh's midnight run has had time to finish (~4h).
-0 1 * * *	/opt/retina/retina-tools/cron/pd_wrapper.sh >> /opt/retina/logs/pd_wrapper.log 2>&1
+# Previous day's PDs; runs after the last Iris run has landed, before the 04:00 run.
+0 2 * * *	/opt/retina/retina-iris-pds/cron/pd_wrapper.sh >> /opt/retina/logs/pd_wrapper.log 2>&1

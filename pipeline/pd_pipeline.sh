@@ -7,7 +7,7 @@
 # cron/pd_wrapper.sh, which adds locking and failure tracking on top of this.
 #
 # Prerequisites:
-#   - tier-1 IP_TRIE dictionaries must be loaded via retina-tools
+#   - tier-1 IP_TRIE dictionaries must be loaded via the tier-1 pipeline
 #     (see pipeline/load_tier1_prefixes.sh)
 #   - irisctl must be available and configured
 #
@@ -127,7 +127,7 @@ check_tier1_dictionaries() {
 	fi
 
 	if [[ "${v4_count}" -eq 0 || "${v6_count}" -eq 0 ]]; then
-		log_fatal "tier-1 prefix tables are empty — run retina-tools first"
+		log_fatal "tier-1 prefix tables are empty — run the tier-1 pipeline first"
 	fi
 
 	if ! clickhouse client --query "SELECT dictGet('tier1_trie_v4', 'origin_asn', toIPv4('1.1.1.1'))" >/dev/null; then

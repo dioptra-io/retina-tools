@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dioptra-io/retina-tools/tier1exclusions/internal/tier1exclusions"
+	"github.com/dioptra-io/retina-iris-pds/tier1exclusions/internal/tier1exclusions"
 )
 
 func writeTempConfig(t *testing.T, content string) string {

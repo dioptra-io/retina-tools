@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Shared helpers for retina-tools/pipeline and retina-tools/cron scripts.
+# Shared helpers for retina-iris-pds/pipeline and retina-iris-pds/cron scripts.
 # Source with: source "${TOPLEVEL}/pipeline/common.sh"
 #
 # Callers are expected to set PROG_NAME and VERBOSE before calling log_info, and
@@ -8,7 +8,7 @@
 # since sourcing runs in the caller's shell, not a scoped subshell.
 #
 # No setup_environment/irisctl_auth (present in iris-tools' common.sh) — those are
-# specific to Iris's sops-based credential flow, which retina-tools doesn't have.
+# specific to Iris's sops-based credential flow, which retina-iris-pds doesn't have.
 # Add deliberately if/when needed, don't assume this is a gap to fill silently.
 #
 
