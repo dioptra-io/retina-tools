@@ -249,8 +249,8 @@ func TestRun_EndToEnd_PartialFailureRetainsProgressFile(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if _, err := Run(context.Background(), cfg, 4, logger); err != nil {
-		t.Fatalf("Run itself should not return an error (per-ASN failures are logged and skipped): %v", err)
+	if _, err := Run(context.Background(), cfg, 4, logger); err == nil {
+		t.Fatal("expected Run to return an error when an ASN failed")
 	}
 
 	progressPath := filepath.Join(outDir, "tier1_progress_v4_2026-08-06.json")

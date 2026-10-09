@@ -32,11 +32,7 @@ var (
 	ripestatBaseURL  = "https://stat.ripe.net/data"
 )
 
-// Timeout must exceed maxRetries*max(backoffFor) or a slow-but-alive server could get
-// cut off mid-retry-sequence; 20 minutes covers the worst case (1+2+4+8+16=31min of
-// sleep is still possible across retries, so this bounds a single REQUEST attempt, not
-// the whole retry loop — context cancellation, not this, is what should stop the loop
-// early on shutdown).
+// Bounds a single request attempt, not the retry loop; ctx cancellation stops the loop.
 var httpClient = &http.Client{Timeout: 20 * time.Minute}
 
 // APIClient wraps a KeyPool for the retry/rate-limit-aware bgproutes.io calls.
@@ -387,19 +383,12 @@ type risPrefixesResponse struct {
 	} `json:"data"`
 }
 
-// FetchAnnouncedPrefixes returns (prefixes, ok) for the given ASN/AFI as of ribDate,
-// via RIPEstat's ris-prefixes endpoint — a genuine historical lookup, not a live one.
-// Pinning this to ribDate matters at the cadence this tool operates at: a
-// run that pauses/resumes across days (rate limits, circuit breaker) must not silently
-// mix a live parent-list fetch from resume time with a rib() more-specifics lookup
-// still pinned to the original snapshot date — and a fixed snapshot date is also what
-// makes a run reproducible/auditable after the fact.
-// ok=false means the request itself failed — distinct from a successful request
-// returning zero prefixes; callers must not conflate the two.
+// FetchAnnouncedPrefixes returns the prefixes ASN originated at ribDate (ris-prefixes
+// honours query_time; announced-prefixes has no date parameter). ok=false means the
+// request failed, as distinct from a successful request returning zero prefixes.
 func FetchAnnouncedPrefixes(ctx context.Context, asn string, afiIs4 bool, ribDate time.Time, logger *slog.Logger) ([]string, bool) {
-	queryTime := ribDate.UTC().Format("2006-01-02T15:04:05")
 	u := fmt.Sprintf("%s/ris-prefixes/data.json?resource=AS%s&list_prefixes=true&query_time=%s",
-		ripestatBaseURL, asn, queryTime)
+		ripestatBaseURL, asn, ribDate.UTC().Format("2006-01-02T15:04:05"))
 
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {

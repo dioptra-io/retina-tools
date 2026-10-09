@@ -33,7 +33,7 @@ const (
 	exitOK          = 0
 	exitConfigError = 1
 	exitRunFailed   = 2
-	defaultRibHour  = "08:00:00" // fixed hour avoids diurnal BGP skew in day-to-day comparisons
+	defaultRibHour  = "00:00:00" // fixed hour avoids diurnal BGP skew in day-to-day comparisons
 )
 
 func parseRibDate(s string) (time.Time, error) {

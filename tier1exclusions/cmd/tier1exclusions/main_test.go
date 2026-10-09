@@ -43,7 +43,7 @@ func TestParseRibDate(t *testing.T) {
 		wantErr bool
 		want    string
 	}{
-		{"2026-08-07", false, "2026-08-07T08:00:00"},
+		{"2026-08-07", false, "2026-08-07T00:00:00"},
 		{"2026-08-07T14:30:00", true, ""}, // full timestamps no longer accepted
 		{"garbage", true, ""},
 		{"", true, ""},

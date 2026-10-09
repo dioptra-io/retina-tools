@@ -211,19 +211,15 @@ type RibQuerier interface {
 type checkpointFunc func(excl map[string][]string, progress AsnProgress)
 
 // processASN runs the full pipeline for one ASN/AFI: fetch, optimize, group,
-// batch-query, assign exclusions. Resumable via existingExcl/priorProgress. A
-// genuinely empty RIPEstat result returns (nil, nil) — distinct from a fetch failure,
-// which returns a non-nil error.
+// batch-query, assign exclusions. Resumable via existingExcl/priorProgress. An empty
+// prefix list is an error: the loader replaces the whole table, so a silently skipped
+// ASN would lose its exclusions.
 func processASN(ctx context.Context, client RibQuerier, asn string, afiIs4 bool, groupPrefixLen int, vpIDs []string,
 	ribDate time.Time, batchSize int, logger *slog.Logger, existingExcl map[string][]string,
 	priorProgress AsnProgress, checkpoint checkpointFunc) ([]ParentExclusions, error) {
 
 	log := logger.With("asn", asn, "afi", afiLabel(afiIs4))
 
-	// afiIs4 and ribDate flow through to FetchAnnouncedPrefixes as well — it queries
-	// RIPEstat's ris-prefixes, split by address family and pinned to ribDate. See
-	// FetchAnnouncedPrefixes for why pinning to ribDate matters at this pipeline's
-	// monthly run cadence.
 	raw, ok := FetchAnnouncedPrefixes(ctx, asn, afiIs4, ribDate, logger)
 	if !ok {
 		return nil, fmt.Errorf("AS%s: RIPEstat fetch failed", asn)
@@ -237,8 +233,7 @@ func processASN(ctx context.Context, client RibQuerier, asn string, afiIs4 bool,
 		log.Warn("Dropped overly-broad prefixes", "count", len(opt.TooBroad), "sample", sample(opt.TooBroad, 5))
 	}
 	if len(opt.Collapsed) == 0 {
-		log.Warn("No prefixes after filtering, skipping")
-		return nil, nil
+		return nil, fmt.Errorf("AS%s: no usable prefixes (raw=%d)", asn, len(raw))
 	}
 
 	queryGroups := BuildQueryGroups(opt.Collapsed, groupPrefixLen)
@@ -481,6 +476,9 @@ func Run(ctx context.Context, cfg Config, afi int, logger *slog.Logger) (Exclusi
 		log.Warn("Could not write metadata file", "error", err)
 	}
 
+	if !allSucceeded {
+		return result, fmt.Errorf("AFI %d: one or more ASNs failed, partial results saved", afi)
+	}
 	return result, nil
 }
 
@@ -531,7 +529,8 @@ func buildRunMetadata(afi int, ribDate time.Time, groupPrefixLen int, vpIDs []st
 // toParentExclusions converts the internal exclusion map into the sorted, JSON-ready
 // slice. Exclusions is always a non-nil slice (possibly empty), never left as Go's
 // zero-value nil — a nil []string marshals to JSON `null`, not `[]`, which silently
-// broke every downstream comparison script expecting a real (if empty) array.
+// broke every downstream comparison script expecting a real (if empty) array, the way
+// Python's sorted(set()) always produces.
 func toParentExclusions(excl map[string][]string) []ParentExclusions {
 	out := make([]ParentExclusions, 0, len(excl))
 	for parent, exclusions := range excl {

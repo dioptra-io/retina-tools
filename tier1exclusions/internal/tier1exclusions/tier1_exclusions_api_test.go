@@ -527,6 +527,32 @@ func TestFetchAnnouncedPrefixes_V6SelectsV6Field(t *testing.T) {
 	}
 }
 
+func TestFetchAnnouncedPrefixes_SendsRibDateAsQueryTime(t *testing.T) {
+	var gotQuery, gotResource string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ris-prefixes/data.json", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("query_time")
+		gotResource = r.URL.Query().Get("resource")
+		_, _ = w.Write([]byte(`{"data":{"prefixes":{"v4":{"originating":[]},"v6":{"originating":[]}}}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	origRIPE := ripestatBaseURL
+	ripestatBaseURL = srv.URL
+	t.Cleanup(func() { ripestatBaseURL = origRIPE })
+
+	ribDate := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
+	if _, ok := FetchAnnouncedPrefixes(context.Background(), "3356", true, ribDate, testLogger()); !ok {
+		t.Fatal("expected ok=true")
+	}
+	if gotQuery != "2026-08-11T00:00:00" {
+		t.Errorf("query_time = %q, want 2026-08-11T00:00:00", gotQuery)
+	}
+	if gotResource != "AS3356" {
+		t.Errorf("resource = %q, want AS3356", gotResource)
+	}
+}
+
 func TestCallBgproutes_RotatesToNextKeyWhenOneIsCapped(t *testing.T) {
 	// Two keys: "bad" is already at its hard rate cap (WaitIfNeeded fails fast), the
 	// other, "good", is healthy. callBgproutes should report the failure on "bad",

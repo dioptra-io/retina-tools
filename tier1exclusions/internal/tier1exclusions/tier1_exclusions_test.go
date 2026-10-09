@@ -745,10 +745,7 @@ func TestProcessASN_RIPEstatFetchFailureReturnsError(t *testing.T) {
 	}
 }
 
-func TestProcessASN_NoPrefixesAfterFilteringReturnsNilNil(t *testing.T) {
-	// A genuinely empty (but successful) RIPEstat response should short-circuit to
-	// (nil, nil) — distinct from a fetch failure, and distinct from an ASN that has
-	// real prefixes to process.
+func TestProcessASN_NoPrefixesIsError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ris-prefixes/data.json", func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]any{
@@ -770,14 +767,11 @@ func TestProcessASN_NoPrefixesAfterFilteringReturnsNilNil(t *testing.T) {
 
 	fq := &fakeRibQuerier{}
 
-	result, err := processASN(context.Background(), fq, "3356", true, 12, []string{"215"},
+	_, err := processASN(context.Background(), fq, "3356", true, 12, []string{"215"},
 		time.Now(), testBatchSize, noopLogger(), nil, AsnProgress{}, func(map[string][]string, AsnProgress) {})
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result != nil {
-		t.Errorf("expected nil result for an ASN with no prefixes, got %+v", result)
+	if err == nil {
+		t.Fatal("expected an error for an ASN with no prefixes, got nil")
 	}
 	if len(fq.calls) != 0 {
 		t.Errorf("expected no rib() calls when there are no prefixes to query, got %d", len(fq.calls))
