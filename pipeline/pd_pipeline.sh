@@ -26,7 +26,7 @@ source "${TOPLEVEL}/pipeline/common.sh"
 #
 DATE=""				# --date
 DRY_RUN=false			# --dry-run
-OUTPUT_DIR="${HOME}/pds"	# --output-dir
+OUTPUT_DIR="${HOME}/data/pds"	# --output-dir
 VERBOSE=1			# --verbose
 
 #

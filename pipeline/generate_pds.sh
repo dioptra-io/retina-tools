@@ -45,7 +45,7 @@ DATE=""			# --date
 ZEPH_INDICES=""		# --zeph-indices (comma-separated, e.g. "0,2,3")
 IPV6_FETCHED=0		# --ipv6-fetched
 DRY_RUN=false		# --dry-run
-OUTPUT_DIR="${HOME}/pds"	# --output-dir
+OUTPUT_DIR="${HOME}/data/pds"	# --output-dir
 VERBOSE=1		# --verbose
 
 # Resources created during a run that must be cleaned up on any exit, success or
