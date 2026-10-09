@@ -17,8 +17,6 @@ readonly VERBOSE=1
 readonly LOCK_FILE="/tmp/${PROG_NAME}.lock"
 readonly FAILURE_MARKER="${LOG_DIR}/pd_last_failure.log"
 
-# No lock-file deletion here — see tier1_wrapper.sh for why (stale lock files are
-# harmless with flock).
 cleanup() {
 	local exit_code="$?"
 
@@ -54,10 +52,9 @@ main() {
 
 	prune_old_output
 	prune_old_iris_tables
+	prune_orphaned_irisctl_files
 
-	# PENDING (target: within ~1 week of 2026-09-08) — not yet active. Once the
-	# orchestrator is ready to receive this, uncomment.
-	#
+	# Disabled until the orchestrator can handle the reload.
 	# if ! docker compose --project-directory "${ORCHESTRATOR_COMPOSE_DIR}" kill -s HUP orchestrator; then
 	# 	log_error "failed to send SIGHUP to orchestrator via docker compose (project dir: ${ORCHESTRATOR_COMPOSE_DIR}) — diff installed but reload not triggered"
 	# fi
@@ -65,13 +62,7 @@ main() {
 	log_info 0 "daily PD generation completed successfully"
 }
 
-#
-# fetch_iris_password
-# Fetches IRIS_PASSWORD fresh from GCP Secret Manager and exports it, so
-# pd_pipeline.sh (and fetch_iris_links.sh's irisctl calls) inherit it — never
-# stored in the crontab or on disk. Requires the VM's service account to have
-# roles/secretmanager.secretAccessor on IRIS_PASSWORD_SECRET_NAME.
-#
+# Exported so pd_pipeline.sh and irisctl inherit it; never stored in the crontab or on disk.
 fetch_iris_password() {
 	if ! IRIS_PASSWORD=$(gcloud secrets versions access latest --secret="${IRIS_PASSWORD_SECRET_NAME}"); then
 		log_fatal "failed to fetch secret ${IRIS_PASSWORD_SECRET_NAME} from GCP Secret Manager"
@@ -79,11 +70,7 @@ fetch_iris_password() {
 	export IRIS_PASSWORD
 }
 
-#
-# prune_old_output
-# Fixed filenames mean this directory doesn't accumulate under normal operation —
-# this only catches orphaned mktemp files from a killed/crashed run.
-#
+# Filenames are fixed, so this only catches orphaned mktemp files from a crashed run.
 prune_old_output() {
 	local removed
 
@@ -100,12 +87,8 @@ prune_old_output() {
 	fi
 }
 
-#
-# prune_old_iris_tables
-# Drops iris_zeph__links__<date>_N / iris_ipv6__links__<date> tables older than
-# IRIS_TABLE_RETENTION_DAYS. Table date is parsed from the table name (fixed-width
-# YYYYMMDD, so plain string comparison against the cutoff is safe).
-#
+# Drops iris_{zeph,ipv6}__links__<date> tables past IRIS_TABLE_RETENTION_DAYS.
+# Fixed-width YYYYMMDD makes the string comparison safe.
 prune_old_iris_tables() {
 	if [[ ! "${IRIS_TABLE_RETENTION_DAYS}" =~ ^[0-9]+$ ]]; then
 		log_fatal "IRIS_TABLE_RETENTION_DAYS must be a non-negative integer, got: ${IRIS_TABLE_RETENTION_DAYS}"
@@ -114,8 +97,7 @@ prune_old_iris_tables() {
 	local cutoff_date
 	cutoff_date=$(date -u -d "-${IRIS_TABLE_RETENTION_DAYS} days" +%Y%m%d)
 
-	# Captured to variables first, not read via `< <(...)` — a failure inside
-	# process substitution is invisible to the parent shell.
+	# Not `< <(...)`: failures inside process substitution are invisible to the parent.
 	local zeph_tables
 	local ipv6_tables
 	if ! zeph_tables=$(clickhouse client --query "SHOW TABLES LIKE 'iris_zeph__links__%'"); then
@@ -153,11 +135,18 @@ prune_old_iris_tables() {
 	fi
 }
 
-#
-# fail_run <step> <exit_code>
-# Writes the failure marker (Grafana/Loki can alert on this or on [ERROR] in logs)
-# and exits non-zero.
-#
+# irisctl never cleans up its /tmp/irisctl-clickhouse-* buffers (up to a few GB each),
+# even after successful runs. The 3h cutoff is well past a single fetch (~10 min), and
+# the prefix is exact because /tmp is shared.
+prune_orphaned_irisctl_files() {
+	local removed
+	removed=$(find /tmp -maxdepth 1 -type f -name 'irisctl-clickhouse-*' -mmin +180 -print -delete | wc -l)
+	if [[ "${removed}" -gt 0 ]]; then
+		log_info 1 "removed ${removed} orphaned irisctl temp file(s) from /tmp"
+	fi
+}
+
+# fail_run <step> <exit_code>: writes the failure marker and exits non-zero.
 fail_run() {
 	local step="$1"
 	local exit_code="$2"
